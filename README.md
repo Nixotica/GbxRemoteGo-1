@@ -153,9 +153,61 @@ func main() {
 
 - **Full XML-RPC compatibility** with existing client code
 - **Custom response injection** for specific method calls
+- **Auto-port assignment** - automatically finds available ports to avoid conflicts
+- **Method call tracking** - record and verify which methods were called
 - **Default responses** for common methods (authentication, version info, etc.)
 - **Easy testing setup** for unit tests and integration tests
 - **No external dependencies** beyond the existing codebase
+
+### Auto-Port Assignment
+
+The mock server can automatically find an available port:
+
+```go
+// Create a server that automatically finds an available port
+mock := mockserver.NewWithAutoPort("127.0.0.1")
+mock.Start()
+
+fmt.Printf("Server listening on %s\n", mock.Address())
+// Outputs: Server listening on 127.0.0.1:5001 (or next available port)
+
+// Get the assigned port for client connections
+client := gbxclient.NewGbxClient("127.0.0.1", mock.Port(), gbxclient.Options{})
+```
+
+Or use the Config approach:
+
+```go
+mock := mockserver.New(mockserver.Config{
+    Host:     "127.0.0.1",
+    AutoPort: true, // Automatically find available port
+})
+```
+
+### Method Call Tracking
+
+Track which methods were called for testing verification:
+
+```go
+mock := mockserver.NewWithAutoPort("127.0.0.1")
+mock.Start()
+
+// ... make some calls with your client ...
+
+// Verify calls were made
+calls := mock.GetMethodCalls()
+if len(calls) == 0 {
+    t.Error("Expected method calls but got none")
+}
+
+// Check if specific method was called
+if mock.WasMethodCalled("SetApiVersion") {
+    fmt.Println("SetApiVersion was called!")
+}
+
+// Reset call history for next test
+mock.ClearMethodCalls()
+```
 
 ### Default Supported Methods
 
