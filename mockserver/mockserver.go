@@ -7,22 +7,49 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
+
+// findAvailablePort finds an available port starting from the given port
+func findAvailablePort(startPort int, host string) (int, error) {
+	if startPort == 0 {
+		startPort = 5000 // Default starting port
+	}
+
+	for port := startPort; port < startPort+1000; port++ {
+		address := fmt.Sprintf("%s:%d", host, port)
+		listener, err := net.Listen("tcp", address)
+		if err == nil {
+			listener.Close()
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no available port found in range %d-%d", startPort, startPort+999)
+}
+
+// MethodCall represents a recorded method call
+type MethodCall struct {
+	Method    string        `json:"method"`
+	Params    []interface{} `json:"params"`
+	Timestamp time.Time     `json:"timestamp"`
+}
 
 // MockServer represents a mock GBX XML-RPC server
 type MockServer struct {
-	host      string
-	port      int
-	listener  net.Listener
-	responses map[string]interface{}
-	mutex     sync.RWMutex
-	running   bool
+	host        string
+	port        int
+	listener    net.Listener
+	responses   map[string]interface{}
+	methodCalls []MethodCall
+	mutex       sync.RWMutex
+	running     bool
 }
 
 // Config holds configuration for the mock server
 type Config struct {
-	Host string
-	Port int
+	Host     string
+	Port     int  // Set to 0 to auto-assign an available port
+	AutoPort bool // If true, automatically find next available port
 }
 
 // New creates a new mock server instance
@@ -30,15 +57,41 @@ func New(config Config) *MockServer {
 	if config.Host == "" {
 		config.Host = "127.0.0.1"
 	}
-	if config.Port == 0 {
-		config.Port = 5000
+
+	port := config.Port
+	if config.AutoPort || config.Port == 0 {
+		// Find an available port
+		availablePort, err := findAvailablePort(config.Port, config.Host)
+		if err != nil {
+			// Fallback to default port if auto-assignment fails
+			port = 5000
+		} else {
+			port = availablePort
+		}
+	}
+
+	if port == 0 {
+		port = 5000
 	}
 
 	return &MockServer{
-		host:      config.Host,
-		port:      config.Port,
-		responses: make(map[string]interface{}),
+		host:        config.Host,
+		port:        port,
+		responses:   make(map[string]interface{}),
+		methodCalls: make([]MethodCall, 0),
 	}
+}
+
+// NewWithAutoPort creates a new mock server instance that automatically finds an available port
+func NewWithAutoPort(host string) *MockServer {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
+	return New(Config{
+		Host:     host,
+		AutoPort: true,
+	})
 }
 
 // SetResponse sets a custom response for a specific method
@@ -46,6 +99,65 @@ func (s *MockServer) SetResponse(method string, response interface{}) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.responses[method] = response
+}
+
+// GetMethodCalls returns a copy of all recorded method calls
+func (s *MockServer) GetMethodCalls() []MethodCall {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Return a copy to prevent external modification
+	calls := make([]MethodCall, len(s.methodCalls))
+	copy(calls, s.methodCalls)
+	return calls
+}
+
+// GetMethodCallsFor returns all calls for a specific method
+func (s *MockServer) GetMethodCallsFor(method string) []MethodCall {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var calls []MethodCall
+	for _, call := range s.methodCalls {
+		if call.Method == method {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+// WasMethodCalled returns true if the specified method was called
+func (s *MockServer) WasMethodCalled(method string) bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	for _, call := range s.methodCalls {
+		if call.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+// GetCallCount returns the number of times a method was called
+func (s *MockServer) GetCallCount(method string) int {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	count := 0
+	for _, call := range s.methodCalls {
+		if call.Method == method {
+			count++
+		}
+	}
+	return count
+}
+
+// ClearMethodCalls clears the method call history
+func (s *MockServer) ClearMethodCalls() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.methodCalls = make([]MethodCall, 0)
 }
 
 // Start starts the mock server
@@ -74,6 +186,11 @@ func (s *MockServer) Stop() error {
 // Port returns the port the server is listening on
 func (s *MockServer) Port() int {
 	return s.port
+}
+
+// Address returns the full address (host:port) the server is listening on
+func (s *MockServer) Address() string {
+	return fmt.Sprintf("%s:%d", s.host, s.port)
 }
 
 func (s *MockServer) acceptConnections() {
@@ -155,6 +272,21 @@ func (s *MockServer) processRequest(xmlData []byte) []byte {
 		return s.buildErrorResponse("Parse error: " + err.Error())
 	}
 
+	// Extract parameters
+	var params []interface{}
+	for _, param := range methodCall.Params.Params {
+		if param.Value.String != "" {
+			params = append(params, param.Value.String)
+		} else if param.Value.Int != 0 {
+			params = append(params, param.Value.Int)
+		} else if param.Value.Boolean != 0 {
+			params = append(params, param.Value.Boolean == 1)
+		}
+	}
+
+	// Record the method call
+	s.recordMethodCall(methodCall.MethodName, params)
+
 	// Get method response
 	s.mutex.RLock()
 	customResponse, hasCustom := s.responses[methodCall.MethodName]
@@ -168,6 +300,20 @@ func (s *MockServer) processRequest(xmlData []byte) []byte {
 	}
 
 	return s.buildSuccessResponse(result)
+}
+
+// recordMethodCall records a method call for tracking purposes
+func (s *MockServer) recordMethodCall(method string, params []interface{}) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	call := MethodCall{
+		Method:    method,
+		Params:    params,
+		Timestamp: time.Now(),
+	}
+
+	s.methodCalls = append(s.methodCalls, call)
 }
 
 func (s *MockServer) getDefaultResponse(method string) interface{} {

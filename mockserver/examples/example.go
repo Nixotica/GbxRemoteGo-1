@@ -10,11 +10,8 @@ import (
 )
 
 func main() {
-	// Create and start mock server
-	mock := mockserver.New(mockserver.Config{
-		Host: "127.0.0.1",
-		Port: 5000,
-	})
+	// Create and start mock server with auto-port assignment
+	mock := mockserver.NewWithAutoPort("127.0.0.1")
 
 	// Set custom response for TriggerModeScriptEventArray
 	mock.SetResponse("TriggerModeScriptEventArray", "Custom response: Pause activated")
@@ -25,13 +22,13 @@ func main() {
 	}
 	defer mock.Stop()
 
-	fmt.Println("Mock server started on port", mock.Port())
+	fmt.Printf("Mock server started on %s\n", mock.Address())
 
 	// Give the server a moment to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Create and connect client
-	client := gbxclient.NewGbxClient("127.0.0.1", 5000, gbxclient.Options{})
+	// Create and connect client using the assigned port
+	client := gbxclient.NewGbxClient("127.0.0.1", mock.Port(), gbxclient.Options{})
 
 	// Connect to the mock server
 	if err := client.Connect(); err != nil {
