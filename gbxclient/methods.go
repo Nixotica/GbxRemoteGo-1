@@ -27,20 +27,25 @@ func (client *GbxClient) Connect() error {
 
 	go client.listen()
 
-	// Wait for connection confirmation from handleData()
+	// Wait for connection confirmation
+	ch := client.getCallbackChannel(id)
 	select {
-	case response := <-client.PromiseCallbacks[id]:
-		delete(client.PromiseCallbacks, id) // Clean up callback
+	case response := <-ch:
+		client.deleteCallback(id)
 		if response.Error != nil {
 			return response.Error // Connection failed
 		}
 		client.Events.emit("connect", true)
 		// Connection successful, return nil
 		return nil
-	case <-time.After(5 * time.Second): // Timeout after 5 seconds
-		delete(client.PromiseCallbacks, id) // Clean up callback
-		client.Socket.Close()
+	case <-time.After(5 * time.Second):
+		client.deleteCallback(id)
+		client.Mutex.Lock()
+		if client.Socket != nil {
+			client.Socket.Close()
+		}
 		client.IsConnected = false
+		client.Mutex.Unlock()
 		client.Events.emit("disconnect", "connection timeout")
 		return errors.New("connection timeout")
 	}
@@ -75,6 +80,9 @@ func (client *GbxClient) Send(method string, params ...any) (any, error) {
 }
 
 func (client *GbxClient) Disconnect() error {
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+	
 	if client.Socket != nil {
 		client.Socket.Close()
 	}
