@@ -44,6 +44,9 @@ func (e *EventEmitter) emit(event string, value any) {
 }
 
 func (client *GbxClient) addCallback(id uint32) error {
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+	
 	if _, exists := client.PromiseCallbacks[id]; exists {
 		return errors.New("callback already exists")
 	}
@@ -52,22 +55,36 @@ func (client *GbxClient) addCallback(id uint32) error {
 	return nil
 }
 
+func (client *GbxClient) getCallbackChannel(id uint32) chan PromiseResult {
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+	return client.PromiseCallbacks[id]
+}
+
+func (client *GbxClient) deleteCallback(id uint32) {
+	client.Mutex.Lock()
+	defer client.Mutex.Unlock()
+	delete(client.PromiseCallbacks, id)
+}
+
 func (client *GbxClient) listen() {
 	buffer := make([]byte, 4096) // Buffer size of 4KB
 
 	for {
 		n, err := client.Socket.Read(buffer)
 		if err != nil {
+			client.Mutex.Lock()
 			client.IsConnected = false
 			if client.Socket != nil {
 				client.Socket.Close()
 				client.Socket = nil
 			}
+			delete(client.PromiseCallbacks, uint32(0))
+			client.Mutex.Unlock()
 			client.Events.emit("disconnect", err.Error())
-			delete(client.PromiseCallbacks, uint32(0)) // Clean up callback
 			return
 		}
-		client.handleData(buffer[:n]) // Pass only received data
+		client.handleData(buffer[:n])
 	}
 }
 
@@ -155,7 +172,6 @@ func (g *GbxClient) handleData(data []byte) {
 }
 
 func (client *GbxClient) sendRequest(xmlString string, wait bool) PromiseResult {
-	// if request is more than 4mb
 	if len(xmlString)+8 > 4*1024*1024 {
 		return PromiseResult{nil, errors.New("request too large")}
 	}
@@ -168,10 +184,11 @@ func (client *GbxClient) sendRequest(xmlString string, wait bool) PromiseResult 
 	handle := client.ReqHandle
 
 	if wait {
-		if err := client.addCallback(handle); err != nil {
+		if _, exists := client.PromiseCallbacks[handle]; exists {
 			client.Mutex.Unlock()
-			return PromiseResult{nil, err}
+			return PromiseResult{nil, errors.New("callback already exists")}
 		}
+		client.PromiseCallbacks[handle] = make(chan PromiseResult)
 	}
 
 	client.Mutex.Unlock()
@@ -184,11 +201,11 @@ func (client *GbxClient) sendRequest(xmlString string, wait bool) PromiseResult 
 	binary.LittleEndian.PutUint32(buf[4:], handle)
 	// Copy XML string into the buffer at offset 8
 	copy(buf[8:], []byte(xmlString))
-	_, err := client.Socket.Write(buf)
-	if err != nil {
-		client.Mutex.Lock()
-		delete(client.PromiseCallbacks, handle)
-		client.Mutex.Unlock()
+	
+	if _, err := client.Socket.Write(buf); err != nil {
+		if wait {
+			client.deleteCallback(handle)
+		}
 		return PromiseResult{nil, err}
 	}
 
@@ -196,18 +213,13 @@ func (client *GbxClient) sendRequest(xmlString string, wait bool) PromiseResult 
 		return PromiseResult{nil, nil}
 	}
 
-	ch := client.PromiseCallbacks[handle]
-
+	ch := client.getCallbackChannel(handle)
 	select {
 	case res := <-ch:
-		client.Mutex.Lock()
-		delete(client.PromiseCallbacks, handle)
-		client.Mutex.Unlock()
+		client.deleteCallback(handle)
 		return res
 	case <-time.After(5 * time.Second):
-		client.Mutex.Lock()
-		delete(client.PromiseCallbacks, handle)
-		client.Mutex.Unlock()
+		client.deleteCallback(handle)
 		return PromiseResult{nil, errors.New("request timed out after 5s")}
 	}
 }
